@@ -10,11 +10,20 @@ namespace nanolob {
 
 struct PriceLevel;
 
+// Benchmarking knob: define NANOLOB_NO_CACHE_ALIGN to drop the cache-line
+// padding of book nodes and measure what the alignment buys (see
+// BENCHMARKS.md). Never set in production builds.
+#ifdef NANOLOB_NO_CACHE_ALIGN
+#define NANOLOB_NODE_ALIGN
+#else
+#define NANOLOB_NODE_ALIGN alignas(kCacheLine)
+#endif
+
 // One resting order. Doubles as the intrusive node of its price level's FIFO
 // list — no separate node allocation, and unlink-by-pointer makes cancel O(1).
 // Padded to exactly one cache line so pool-adjacent orders never false-share
 // and a fill touches a single line.
-struct alignas(kCacheLine) Order {
+struct NANOLOB_NODE_ALIGN Order {
   Order* prev = nullptr;  // toward the front (older) of the FIFO
   Order* next = nullptr;  // toward the back (newer) of the FIFO
   PriceLevel* level = nullptr;
@@ -24,11 +33,13 @@ struct alignas(kCacheLine) Order {
   ParticipantId participant = 0;
   Side side = Side::Bid;
 };
+#ifndef NANOLOB_NO_CACHE_ALIGN
 static_assert(sizeof(Order) == kCacheLine, "Order must stay a single cache line");
+#endif
 
 // One price level: FIFO queue of orders plus its neighbours in the side's
 // price-sorted level list ("better" = closer to the touch).
-struct alignas(kCacheLine) PriceLevel {
+struct NANOLOB_NODE_ALIGN PriceLevel {
   PriceLevel* better = nullptr;
   PriceLevel* worse = nullptr;
   Order* front = nullptr;  // oldest order: first to fill
@@ -37,7 +48,9 @@ struct alignas(kCacheLine) PriceLevel {
   Qty total_qty = 0;
   std::uint32_t order_count = 0;
 };
+#ifndef NANOLOB_NO_CACHE_ALIGN
 static_assert(sizeof(PriceLevel) == kCacheLine, "PriceLevel must stay a single cache line");
+#endif
 
 // One side of the book. Levels live in two structures at once:
 //  - a flat hash map price -> level for O(1) lookup when an order arrives at

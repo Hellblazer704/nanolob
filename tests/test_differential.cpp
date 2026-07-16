@@ -13,7 +13,7 @@
 
 #include "nanolob/engine.hpp"
 #include "recording_handler.hpp"
-#include "reference_engine.hpp"
+#include "nanolob/testing/reference_engine.hpp"
 
 using namespace nanolob;
 using test::Event;

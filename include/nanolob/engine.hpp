@@ -39,7 +39,11 @@ struct NullHandler {
 // Order ids are caller-assigned and must be unique among *live* orders;
 // reusing the id of a fully filled/cancelled order is allowed (as on most
 // real venues, where uniqueness is per-day and enforced only on live ids).
-template <typename Handler>
+//
+// IdMap is the order-id -> Order* lookup structure. The default is the
+// engine's own flat hash map; the benchmark suite swaps in a
+// std::unordered_map adapter to isolate what that choice is worth.
+template <typename Handler, typename IdMap = FlatHashMap<OrderId, Order*>>
 class MatchingEngine {
  public:
   explicit MatchingEngine(Handler& handler, StpPolicy stp = StpPolicy::None,
@@ -212,7 +216,7 @@ class MatchingEngine {
   OrderBook book_;
   Pool<Order> order_pool_;
   Pool<PriceLevel> level_pool_;
-  FlatHashMap<OrderId, Order*> orders_by_id_;
+  IdMap orders_by_id_;
   Handler& handler_;
   StpPolicy stp_;
 };
