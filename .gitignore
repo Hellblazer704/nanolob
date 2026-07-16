@@ -1,0 +1,19 @@
+build/
+build-*/
+out/
+.cache/
+.vscode/
+.idea/
+*.user
+compile_commands.json
+
+# Phase 3 captured market data (large; regenerate with scripts/download_binance.py)
+data/*.jsonl
+data/*.jsonl.gz
+data/*.csv
+
+# Phase 4/5 generated outputs
+results/
+analysis/.ipynb_checkpoints/
+__pycache__/
+.venv/

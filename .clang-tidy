@@ -1,0 +1,23 @@
+---
+Checks: >
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  cppcoreguidelines-*,
+  clang-analyzer-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-avoid-do-while,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
+HeaderFilterRegex: 'include/nanolob/.*'
+FormatStyle: file
