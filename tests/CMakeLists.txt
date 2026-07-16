@@ -4,7 +4,9 @@ add_executable(nanolob_tests
   test_engine.cpp
   test_differential.cpp
   test_spsc_ring.cpp
+  test_replay.cpp
 )
+target_include_directories(nanolob_tests PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(nanolob_tests
   PRIVATE nanolob::nanolob nanolob_build_flags Catch2::Catch2WithMain)
 
