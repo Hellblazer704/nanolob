@@ -37,8 +37,11 @@ TEST_CASE("parser handles the three capture record types") {
   REQUIRE(snap->snapshot.asks.size() == 1);
   CHECK(snap->snapshot.asks[0].price == 10052);
 
+  // Local capture ts deliberately differs from the exchange event time E by
+  // 1400ms (the dev box's real clock skew) so that reading the wrong field is
+  // a test failure rather than a coincidence.
   const std::string diff_line =
-      R"({"type":"diff","ts":1752600000100,"data":{"e":"depthUpdate","E":1752600000100,)"
+      R"({"type":"diff","ts":1752599998700,"data":{"e":"depthUpdate","E":1752600000100,)"
       R"("s":"BTCUSDT","U":778,"u":780,"b":[["100.50","0.00000000"]],)"
       R"("a":[["100.53","0.75000000"],["100.52","0.00000000"]]}})";
   auto diff = parse_line(diff_line);
@@ -46,6 +49,10 @@ TEST_CASE("parser handles the three capture record types") {
   REQUIRE(diff->kind == Record::Kind::Diff);
   CHECK(diff->diff.first_id == 778);
   CHECK(diff->diff.last_id == 780);
+  // Diffs must carry the exchange event time "E", not the wrapper's local
+  // capture "ts" — trades use exchange time, and the capture host's clock is
+  // not the exchange's. Here they differ so the wrong one is detectable.
+  CHECK(diff->diff.ts == 1752600000100);
   REQUIRE(diff->diff.bids.size() == 1);
   CHECK(diff->diff.bids[0].qty == 0);
   REQUIRE(diff->diff.asks.size() == 2);

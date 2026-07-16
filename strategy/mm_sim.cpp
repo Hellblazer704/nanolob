@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <string>
 #include <vector>
@@ -111,6 +112,11 @@ int run(const Params& p) {
 
   std::ofstream ts_out(p.out_prefix + "_timeseries.csv");
   std::ofstream fills_out(p.out_prefix + "_fills.csv");
+  // Default ostream precision is 6 *significant* digits, which quantizes a
+  // ~6.4e6-tick mid onto a 10-tick grid and destroys every sub-0.10-USDT
+  // move in the exported series. 17 digits round-trips a double exactly.
+  ts_out << std::setprecision(17);
+  fills_out << std::setprecision(17);
   ts_out << "ts_ms,mid_ticks,best_bid,best_ask,sigma_ticks_per_sqrt_s,inventory_lots,"
             "cash_usdt,pnl_usdt,spread_pnl_usdt,inv_pnl_usdt,bid_px,ask_px,"
             "bid_queue_ahead,ask_queue_ahead\n";

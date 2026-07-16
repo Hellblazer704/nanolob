@@ -153,7 +153,12 @@ inline std::optional<Record> parse_line(std::string_view line) {
     if (!first || !last) return std::nullopt;
     rec.diff.first_id = *first;
     rec.diff.last_id = *last;
-    rec.diff.ts = static_cast<std::int64_t>(ts.value_or(0));
+    // Exchange event time "E", NOT the wrapper's local capture "ts": trades
+    // are timestamped with exchange time, and the capture host's clock can be
+    // seconds off (measured ~1.4s on the dev box). Mixing the two clocks
+    // silently skews every fill-relative horizon downstream. One clock only.
+    rec.diff.ts = static_cast<std::int64_t>(
+        detail::find_u64(line, "\"E\":").value_or(ts.value_or(0)));
     if (!detail::parse_level_array(line, "\"b\":", rec.diff.bids)) return std::nullopt;
     if (!detail::parse_level_array(line, "\"a\":", rec.diff.asks)) return std::nullopt;
     return rec;
