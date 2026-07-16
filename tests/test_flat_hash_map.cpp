@@ -61,7 +61,7 @@ TEST_CASE("flat hash map for_each visits every live entry") {
 TEST_CASE("flat hash map randomized churn matches std::unordered_map") {
   FlatHashMap<std::uint64_t, std::uint64_t> map(16);
   std::unordered_map<std::uint64_t, std::uint64_t> oracle;
-  std::mt19937_64 rng(0xC0FFEE);
+  std::mt19937_64 rng(0xC0FFEE);  // NOLINT(bugprone-random-generator-seed): deterministic test
   // Small key space forces heavy insert/erase collisions on the same slots.
   std::uniform_int_distribution<std::uint64_t> key_dist(0, 500);
 

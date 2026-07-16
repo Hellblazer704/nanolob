@@ -271,6 +271,6 @@ int main(int argc, char** argv) {
   std::string path = "data/btcusdt_capture.jsonl";
   int settle = 200;  // ~20s of 100ms diffs
   if (argc > 1) path = argv[1];
-  if (argc > 2) settle = std::atoi(argv[2]);
+  if (argc > 2) settle = static_cast<int>(std::strtol(argv[2], nullptr, 10));
   return nanolob::replay::run(path, settle);
 }

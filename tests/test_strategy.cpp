@@ -110,7 +110,7 @@ TEST_CASE("variance estimator tracks the scale of mid moves") {
 }
 
 TEST_CASE("A-S reservation price skews against inventory") {
-  AvellanedaStoikov as(/*gamma=*/1e-3, /*k=*/0.5, /*tau=*/10.0, /*q_max=*/10.0);
+  AvellanedaStoikov as(/*gamma=*/1e-3, /*k=*/0.5, /*tau_s=*/10.0, /*q_max=*/10.0);
   MarketState flat{10000.0, 9995, 10005, /*var_rate=*/100.0, /*q_units=*/0.0};
   MarketState longish = flat;
   longish.q_units = 3.0;
@@ -144,7 +144,7 @@ TEST_CASE("A-S spread widens with volatility") {
 }
 
 TEST_CASE("strategies never cross the market and respect the inventory cap") {
-  NaiveFixedSpread naive(/*half_spread=*/1.0, /*q_max=*/2.0);
+  NaiveFixedSpread naive(/*half_spread_ticks=*/1.0, /*q_max=*/2.0);
   // Wide raw quotes vs a tight market: clamped inside the touch.
   MarketState tight{10000.0, 9999, 10001, 10.0, 0.0};
   const QuotePair q = naive.quotes(tight);

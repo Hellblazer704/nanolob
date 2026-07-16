@@ -86,9 +86,10 @@ void run_differential(std::uint64_t seed, StpPolicy stp) {
     // Compare the newly appended event suffix.
     INFO("seed=" << seed << " stp=" << static_cast<int>(stp) << " op#" << i << " " << op_desc);
     REQUIRE(engine_events.events.size() == ref_events.events.size());
-    const bool suffix_equal = std::equal(engine_events.events.begin() + event_cursor,
+    const auto cursor = static_cast<std::ptrdiff_t>(event_cursor);
+    const bool suffix_equal = std::equal(engine_events.events.begin() + cursor,
                                          engine_events.events.end(),
-                                         ref_events.events.begin() + event_cursor);
+                                         ref_events.events.begin() + cursor);
     if (!suffix_equal) {
       std::ostringstream oss;
       for (std::size_t j = event_cursor; j < engine_events.events.size(); ++j) {

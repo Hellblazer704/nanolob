@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: build & test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DNANOLOB_BUILD_BENCH=ON
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitize:
+    name: ASan + UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DNANOLOB_SANITIZE=ON -DNANOLOB_BUILD_BENCH=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Test under sanitizers
+        run: ctest --test-dir build --output-on-failure
+        env:
+          ASAN_OPTIONS: strict_string_checks=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  coverage:
+    name: coverage gate (>=85% engine lines)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DNANOLOB_COVERAGE=ON -DNANOLOB_BUILD_BENCH=OFF
+      - name: Build
+        run: cmake --build build
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Coverage gate
+        run: python3 scripts/coverage_gate.py build --threshold 85
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy
+      - name: Configure (compile database)
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DNANOLOB_BUILD_BENCH=OFF
+        env:
+          CC: clang
+          CXX: clang++
+      - name: clang-tidy
+        run: >
+          run-clang-tidy -p build -quiet
+          "$(pwd)/tests/.*\.cpp" "$(pwd)/replay/.*\.cpp" "$(pwd)/strategy/.*\.cpp"

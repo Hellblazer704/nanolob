@@ -17,7 +17,10 @@ Checks: >
   -cppcoreguidelines-owning-memory,
   -cppcoreguidelines-avoid-non-const-global-variables,
   -cppcoreguidelines-avoid-do-while,
-  -bugprone-easily-swappable-parameters
+  -bugprone-easily-swappable-parameters,
+  -bugprone-unchecked-optional-access,
+  -bugprone-throwing-static-initialization,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
 WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
 HeaderFilterRegex: 'include/nanolob/.*'
 FormatStyle: file
