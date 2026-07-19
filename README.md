@@ -182,27 +182,38 @@ with `u <= lastUpdateId`, require the first applied diff to straddle
 
 ### Validation — the interesting part
 
-Diffs carry **absolute** quantities, so replaying one is idempotent. That
-enables a strong check: for each later snapshot, seed a **shadow book** from
-it, let both books consume the identical diff stream, and after a settling
-window require the top 400 levels per side to match **exactly**. Any drift the
-main book accumulated earlier persists on levels the diffs no longer touch, so
-this catches real desync rather than mere recent-window agreement.
+A snapshot's `lastUpdateId` is the final update id of a completed diff batch,
+so the moment our applied sequence reaches `last_u == lastUpdateId`, our
+reconstructed book **must equal the exchange's own book at that instant**. The
+tool compares them directly, top 400 levels per side, price *and* quantity,
+exactly — at every snapshot's own sequence point.
+
+That directness matters, and it's a correction to an earlier, weaker design.
+The first version seeded a *shadow* book from each snapshot and compared it to
+the main book after both consumed ~20 s of diffs. That was too weak: because
+diffs carry **absolute** quantities, any two books consuming the same stream
+*converge* on the levels it touches, so the check could pass while the main
+book was actually wrong at the snapshot instant. Comparing against the
+exchange's levels at the exact sequence point removes both the convergence
+masking and the settling heuristic. The check is **fault-injection tested**:
+dropping 1 in 5000 level updates turns it red (371 mismatches).
 
 **Results across two live BTCUSDT captures (6 min + 25 min), verbatim:**
 
 ```
-parsed 44516 records in 0.19s (13 snapshots, 14968 diffs, 29535 trades, 0 bad lines)
+parsed 44516 records (13 snapshots, 14968 diffs, 29535 trades, 0 bad lines)
 replay: 14965 diffs applied (3 pre-snapshot skipped, 0 sequence gaps)
-mirror: 404782 level updates -> engine in 0.183s (2.22M updates/s)
-phantom matches while mirroring (crossed input anomalies): 0
-  snapshot 97484021786: 800 levels compared, 0 mismatches -> PASS
+mirror: 404782 level updates -> engine, 0 phantom matches
+validation: reconstructed book vs exchange snapshot, at the snapshot's own
+            sequence point (last_u == lastUpdateId), top 400 levels/side:
+  snapshot 97484021786: bid 6407902/6407902 ask 6407903/6407903 | 800 levels, 0 mismatches -> PASS
   ... (12 snapshots)
 BOOK RECONSTRUCTION VALIDATED
 ```
 
 Across both captures: **490k level updates, 0 sequence gaps, 0 phantom
-matches, and 17/17 snapshot validations exact** (800 levels compared each).
+matches, and 17/17 snapshot validations exact** (bid/ask shown are
+ours/exchange — they match to the tick).
 
 This was additionally cross-checked against a completely independent
 reconstruction written in Python, and directly against raw snapshot level
@@ -329,7 +340,7 @@ gaps.
 
 ## Testing strategy
 
-**52 test cases, ~683k assertions**, Catch2. `ctest --test-dir build`.
+**54 test cases, ~6.1M assertions**, Catch2. `ctest --test-dir build`.
 
 ### The centerpiece: randomized differential testing
 
@@ -370,14 +381,17 @@ across heavy add/cancel churn
 </details>
 
 <details>
-<summary><b>Data structures — 8 cases</b></summary>
+<summary><b>Data structures — 10 cases</b></summary>
 
 **Flat hash map**: basic insert/find/erase · growth past initial capacity ·
 `for_each` visits every live entry · `reserve` avoids rehash ·
 **200k-operation randomized churn cross-checked against `std::unordered_map`
-on a deliberately small key space** — this specifically targets backward-shift
-deletion, whose failure mode is a corrupted probe chain making some key
-silently unreachable; the test finishes with a full reachability sweep.
+on a deliberately small key space** — this targets backward-shift deletion,
+whose failure mode is a corrupted probe chain making some key silently
+unreachable · a **maximal-collision variant** (48-key space forcing long
+wrap-around probe chains) that runs a full reachability sweep *after every
+erase* · a **full random drain** that empties a 20k-key table in shuffled
+order, checking survivors stay reachable as the table empties.
 
 **Pool**: distinct objects + LIFO storage recycling (verified by address) ·
 `reserve` pre-grows so no slab allocation occurs during the run ·
@@ -421,13 +435,14 @@ volatility** · strategies never cross the market and respect inventory caps.
 
 ### Continuous integration
 
-Every push runs [five jobs](.github/workflows/ci.yml):
+Every push runs [six jobs](.github/workflows/ci.yml):
 
 | Job | What it guards |
 |---|---|
 | build & test (gcc) | correctness |
 | build & test (clang) | portability, second opinion on UB |
 | **ASan + UBSan** | the full suite — including the differential tests — under sanitizers |
+| **ThreadSanitizer** | the lock-free ring's cross-thread test — ASan/UBSan can't see data races, only TSan can |
 | **clang-tidy** | `bugprone-*` and `clang-analyzer-*` as **errors** |
 | **coverage gate** | fails under **85%** engine line coverage (currently **100%**) |
 
@@ -451,7 +466,8 @@ the verification actually caught.
 | **CSV precision** — `ostream`'s default 6 *significant* digits quantized a 6.4e6-tick mid onto a 10-tick grid, erasing every sub-0.10-USDT move | Noticing the exported `mid_ticks` (`6.40948e+06`) disagreed with the exact integer `best_bid`/`best_ask` columns in the same row | Corrupted the exported series the analysis reads; the simulation itself was always full-precision |
 | **Mixed clocks** — fills carried Binance's exchange trade time `T` while book updates carried the capture host's local clock, measured **1.44 s behind** the exchange | A 1-second markout of −526 ticks was physically implausible for quotes sitting 1–5 ticks off the mid | Every fill-relative horizon skewed by 1.44 s; fixing it moved the 1 s markout to −417 ticks and median queue wait from 5.6 s to 4.2 s |
 | **Notebook merge misalignment** — `merge_asof` returns a fresh `RangeIndex`, so an unsorted left frame silently misaligns results | Code review while chasing the clock bug | Latent; would have corrupted markouts on any capture with out-of-order fills |
-| **Validation false failure** — comparing *all* levels flagged mismatches on deep levels that diffs simply never touch (a structural property of diff-based reconstruction, not drift) | First validation run: 3/5 FAIL | Fixed by comparing the top 400 levels per side and replaying a rolling diff window into freshly-seeded shadows |
+| **Validation false failure** — comparing *all* levels flagged mismatches on deep levels that diffs simply never touch (a structural property of diff-based reconstruction, not drift) | First validation run: 3/5 FAIL | Fixed by bounding the comparison to the top 400 levels per side |
+| **Validation too weak** — the shadow-book design let both books *converge* on the diff-touched levels, so it could pass while the main book was wrong at the snapshot instant | Auditing *why* the check passed, then confirming a stronger check (compare against the exchange's own levels at the exact sequence point) also passes — and that fault injection turns it red | Weak test, not a product bug; replaced with the direct sequence-point comparison now shipping |
 
 The book reconstruction itself was verified three independent ways before the
 phase-4 numbers were trusted: against exchange REST snapshots (17/17 exact),
@@ -495,10 +511,14 @@ Sanitizer and coverage builds:
 
 ```sh
 cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DNANOLOB_SANITIZE=ON
+cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DNANOLOB_TSAN=ON
 cmake -S . -B build-cov  -G Ninja -DCMAKE_BUILD_TYPE=Debug -DNANOLOB_COVERAGE=ON
 cmake --build build-cov && ctest --test-dir build-cov
 python scripts/coverage_gate.py build-cov --threshold 85
 ```
+
+(ASan/UBSan/TSan need a Linux or macOS toolchain — the sanitizer runtimes are
+not shipped with the MinGW build used on Windows; CI runs them on Linux.)
 
 `nanolob_mmsim` flags: `--strategy as|naive`, `--size`, `--gamma`, `--k`,
 `--tau`, `--qmax`, `--half-spread`, `--warmup`.
@@ -518,7 +538,7 @@ include/nanolob/          the engine — header-only, no dependencies (847 lines
   feed.hpp                  32-byte FeedMsg + dispatch
   testing/reference_engine.hpp   naive oracle (differential tests + bench baseline)
 
-tests/                    52 Catch2 cases (1418 lines)
+tests/                    54 Catch2 cases
 bench/                    Google Benchmark suite, all design points (469 lines)
 replay/                   Binance parser, book mirror, validating replay tool (552 lines)
 strategy/                 A-S + naive, queue-position fill sim, PnL decomp (520 lines)

@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <random>
 #include <unordered_map>
+#include <vector>
 
 #include "nanolob/flat_hash_map.hpp"
 
@@ -106,4 +108,56 @@ TEST_CASE("flat hash map reserve avoids rehash during fill") {
   const std::size_t cap = map.capacity();
   for (std::uint64_t i = 0; i < 1000; ++i) map.insert(i, 0);
   CHECK(map.capacity() == cap);
+}
+
+// Worst case for backward-shift deletion: a tiny key space forces long probe
+// chains that constantly wrap the table boundary, so an off-by-one in the
+// shift logic corrupts a chain and orphans a key. Cross-checked against
+// std::unordered_map, with a full reachability sweep after each erase.
+TEST_CASE("flat hash map maximal-collision churn keeps every key reachable") {
+  FlatHashMap<std::uint64_t, std::uint64_t> map(16);
+  std::unordered_map<std::uint64_t, std::uint64_t> oracle;
+  std::mt19937_64 rng(0xD15EA5E);  // NOLINT(bugprone-random-generator-seed): deterministic test
+  std::uniform_int_distribution<std::uint64_t> key_dist(0, 48);  // << table size
+
+  for (int i = 0; i < 100000; ++i) {
+    const std::uint64_t key = key_dist(rng);
+    if (rng() & 1) {
+      CHECK(map.insert(key, key ^ 0xABCD) == !oracle.contains(key));
+      oracle.emplace(key, key ^ 0xABCD);
+    } else {
+      CHECK(map.erase(key) == (oracle.erase(key) > 0));
+    }
+    REQUIRE(map.size() == oracle.size());
+    // Every surviving key must remain reachable through its (now shifted)
+    // probe chain — this is what a corrupted backward-shift would break.
+    for (const auto& [k, v] : oracle) {
+      auto* found = map.find(k);
+      REQUIRE(found != nullptr);
+      REQUIRE(*found == v);
+    }
+  }
+}
+
+// Fill to just under the load-factor bound, then drain in random order,
+// verifying survivors stay reachable as the table empties.
+TEST_CASE("flat hash map full random drain keeps survivors reachable") {
+  FlatHashMap<std::uint64_t, std::uint64_t> map(16);
+  std::vector<std::uint64_t> keys;
+  for (std::uint64_t i = 0; i < 20000; ++i) {
+    const std::uint64_t k = i * 2654435761ULL;  // Knuth multiplicative spread
+    map.insert(k, i);
+    keys.push_back(k);
+  }
+  std::mt19937_64 rng(4242);  // NOLINT(bugprone-random-generator-seed): deterministic test
+  std::shuffle(keys.begin(), keys.end(), rng);
+
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    REQUIRE(map.erase(keys[i]));
+    for (int s = 0; s < 16 && i + 1 < keys.size(); ++s) {
+      const std::size_t j = i + 1 + rng() % (keys.size() - i - 1);
+      REQUIRE(map.find(keys[j]) != nullptr);
+    }
+  }
+  CHECK(map.empty());
 }

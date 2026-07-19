@@ -54,6 +54,26 @@ jobs:
           ASAN_OPTIONS: strict_string_checks=1:detect_stack_use_after_return=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
+  thread-sanitize:
+    name: ThreadSanitizer (lock-free ring)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DNANOLOB_TSAN=ON -DNANOLOB_BUILD_BENCH=OFF
+      - name: Build
+        run: cmake --build build
+      # ASan/UBSan cannot see data races; only TSan can. The ring is the only
+      # lock-free concurrent code, so run its cross-thread test under TSan.
+      - name: Ring test under TSan
+        run: ctest --test-dir build --output-on-failure -R "spsc ring"
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+
   coverage:
     name: coverage gate (>=85% engine lines)
     runs-on: ubuntu-24.04

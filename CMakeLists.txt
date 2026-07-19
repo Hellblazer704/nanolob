@@ -13,6 +13,7 @@ option(NANOLOB_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(NANOLOB_BUILD_BENCH "Build benchmarks" ${PROJECT_IS_TOP_LEVEL})
 option(NANOLOB_SANITIZE "Build with ASan + UBSan" OFF)
 option(NANOLOB_COVERAGE "Build with gcov coverage instrumentation" OFF)
+option(NANOLOB_TSAN "Build with ThreadSanitizer (for the lock-free ring)" OFF)
 
 # The engine itself: header-only, no dependencies.
 add_library(nanolob INTERFACE)
@@ -40,6 +41,17 @@ endif()
 if(NANOLOB_COVERAGE)
   target_compile_options(nanolob_build_flags INTERFACE --coverage -O0 -g)
   target_link_options(nanolob_build_flags INTERFACE --coverage)
+endif()
+
+if(NANOLOB_TSAN)
+  if(MSVC)
+    message(FATAL_ERROR "NANOLOB_TSAN is only wired up for GCC/Clang")
+  endif()
+  # -O2 so the compiler is actually free to reorder around the atomics — a
+  # TSan run at -O0 would miss orderings the optimizer is allowed to produce.
+  target_compile_options(nanolob_build_flags INTERFACE
+    -fsanitize=thread -fno-omit-frame-pointer -O2 -g)
+  target_link_options(nanolob_build_flags INTERFACE -fsanitize=thread)
 endif()
 
 include(FetchContent)

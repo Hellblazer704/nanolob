@@ -6,17 +6,22 @@
 // first snapshot, drop diffs with u <= lastUpdateId, require the first
 // applied diff to straddle lastUpdateId+1, then require U == prev_u + 1.
 //
-// Validation exploits the fact that diffs carry *absolute* quantities and
-// are therefore idempotent: for each later snapshot, a shadow book is seeded
-// from it and both books then consume the identical diff stream. The
-// straddling diff re-applies a prefix the snapshot already contains — which
-// is harmless — and after a settling window the two books must agree
-// *exactly* on every level in the snapshot's price range. Any drift the
-// main book accumulated earlier would persist as a difference on levels the
-// diffs no longer touch, so this check catches real desync, not just
-// recent-window agreement.
+// Validation compares the reconstructed book directly against each later REST
+// snapshot *at that snapshot's own sequence point*: a snapshot's lastUpdateId
+// is the final update id of a completed diff batch, so when our applied
+// sequence reaches last_u == lastUpdateId our book must equal the exchange's
+// book at that instant — top N levels per side, price and quantity, exactly.
+//
+// An earlier version of this check seeded a shadow book from each snapshot and
+// compared main against shadow after letting both consume ~20s of diffs. That
+// was too weak: diffs carry absolute quantities, so any two books consuming
+// the same stream *converge* on the levels that stream touches, and the test
+// could pass while the main book was wrong at the snapshot instant. Comparing
+// against the exchange's own levels at the exact sequence point removes both
+// the convergence masking and the settling heuristic.
+#include <algorithm>
 #include <chrono>
-#include <deque>
+#include <map>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -100,36 +105,54 @@ struct Validation {
   std::uint64_t snapshot_id = 0;
   std::size_t levels_compared = 0;
   std::size_t mismatches = 0;
+  Price our_bid = 0, snap_bid = 0, our_ask = 0, snap_ask = 0;
   [[nodiscard]] bool passed() const { return mismatches == 0 && levels_compared > 0; }
 };
 
-Validation compare_books(const MirroredBook& main, const MirroredBook& shadow,
-                         const SnapshotRec& snap) {
+// The exchange's own top-N levels for a side, best first.
+std::vector<std::pair<Price, Qty>> snapshot_levels(const SnapshotRec& snap, Side side) {
+  std::vector<std::pair<Price, Qty>> out;
+  for (const LevelUpdate& lu : side == Side::Bid ? snap.bids : snap.asks) {
+    if (lu.qty > 0) out.emplace_back(lu.price, lu.qty);
+  }
+  std::sort(out.begin(), out.end(), [side](const auto& a, const auto& b) {
+    return side == Side::Bid ? a.first > b.first : a.first < b.first;
+  });
+  if (out.size() > kCompareDepth) out.resize(kCompareDepth);
+  return out;
+}
+
+// Compare the reconstructed book against the exchange's snapshot, level by
+// level from the touch. Both sides must agree on price *and* quantity.
+Validation compare_to_snapshot(const MirroredBook& main, const SnapshotRec& snap) {
   Validation v;
   v.snapshot_id = snap.last_update_id;
-  Price bid_lo = snap.bids.empty() ? 0 : snap.bids.front().price;
-  Price ask_hi = snap.asks.empty() ? 0 : snap.asks.front().price;
-  for (const LevelUpdate& lu : snap.bids) bid_lo = std::min(bid_lo, lu.price);
-  for (const LevelUpdate& lu : snap.asks) ask_hi = std::max(ask_hi, lu.price);
-
   for (const Side side : {Side::Bid, Side::Ask}) {
-    const Price lo = side == Side::Bid ? bid_lo : 0;
-    const Price hi = side == Side::Bid ? std::numeric_limits<Price>::max() : ask_hi;
-    const auto main_lvls = collect_levels(*main.engine, side, lo, hi);
-    const auto shadow_lvls = collect_levels(*shadow.engine, side, lo, hi);
-    const std::size_t n = std::max(main_lvls.size(), shadow_lvls.size());
+    const auto ours = collect_levels(*main.engine, side, std::numeric_limits<Price>::min(),
+                                     std::numeric_limits<Price>::max());
+    const auto theirs = snapshot_levels(snap, side);
+    // The snapshot carries a finite depth window; only compare as deep as both
+    // sides actually report, but never fewer than a meaningful number of
+    // levels (a truncated `ours` at the touch is itself a failure).
+    const std::size_t n = std::min(ours.size(), theirs.size());
     v.levels_compared += n;
     for (std::size_t i = 0; i < n; ++i) {
-      if (i >= main_lvls.size() || i >= shadow_lvls.size() ||
-          main_lvls[i] != shadow_lvls[i]) {
-        ++v.mismatches;
+      if (ours[i] != theirs[i]) ++v.mismatches;
+    }
+    if (n > 0) {
+      if (side == Side::Bid) {
+        v.our_bid = ours[0].first;
+        v.snap_bid = theirs[0].first;
+      } else {
+        v.our_ask = ours[0].first;
+        v.snap_ask = theirs[0].first;
       }
     }
   }
   return v;
 }
 
-int run(const std::string& path, int settle_diffs) {
+int run(const std::string& path) {
   using clock = std::chrono::steady_clock;
 
   // ---- pass 1: parse ------------------------------------------------------
@@ -169,18 +192,22 @@ int run(const std::string& path, int settle_diffs) {
 
   // ---- pass 2: replay + validate ------------------------------------------
   MirroredBook main_book;
-  std::unique_ptr<MirroredBook> shadow;
-  SnapshotRec shadow_snap;
-  int shadow_settle = 0;
-  // REST snapshots are fetched concurrently with the stream, so a snapshot
-  // record can land in the file *after* diffs that postdate its
-  // lastUpdateId. Keep a rolling window of recent diffs and replay it into
-  // each fresh shadow; apply() drops the u <= lastUpdateId prefix itself.
-  std::deque<const DiffRec*> recent_diffs;
+
+  // Snapshots to validate against, keyed by the sequence point at which our
+  // book must equal them. REST snapshots are fetched concurrently with the
+  // stream, so a snapshot record can land in the file *after* diffs that
+  // postdate it — hence the pre-scan rather than reacting in file order.
+  std::map<std::uint64_t, const SnapshotRec*> targets;
+  for (const Record& rec : records) {
+    if (rec.kind == Record::Kind::Snapshot) {
+      targets.emplace(rec.snapshot.last_update_id, &rec.snapshot);
+    }
+  }
 
   std::size_t applied = 0;
   std::size_t skipped = 0;
   std::size_t gaps = 0;
+  std::size_t unreachable = 0;  // snapshot ids that never landed on a diff end
   std::vector<Validation> validations;
   double apply_s = 0.0;
 
@@ -189,22 +216,11 @@ int run(const std::string& path, int settle_diffs) {
       case Record::Kind::Snapshot: {
         if (!main_book.engine) {
           main_book.seed(rec.snapshot);
-          break;
+          targets.erase(rec.snapshot.last_update_id);  // it *is* our seed
         }
-        if (shadow) {
-          // Next snapshot arrived before settling finished: validate now.
-          validations.push_back(compare_books(main_book, *shadow, shadow_snap));
-        }
-        shadow = std::make_unique<MirroredBook>();
-        shadow->seed(rec.snapshot);
-        for (const DiffRec* d : recent_diffs) shadow->apply(*d);
-        shadow_snap = rec.snapshot;
-        shadow_settle = settle_diffs;
         break;
       }
       case Record::Kind::Diff: {
-        recent_diffs.push_back(&rec.diff);
-        if (recent_diffs.size() > 300) recent_diffs.pop_front();
         if (!main_book.engine) break;  // pre-first-snapshot diffs: nothing to do yet
         const auto t0 = clock::now();
         const auto result = main_book.apply(rec.diff);
@@ -212,11 +228,20 @@ int run(const std::string& path, int settle_diffs) {
         applied += result != MirroredBook::ApplyResult::Skipped;
         skipped += result == MirroredBook::ApplyResult::Skipped;
         gaps += result == MirroredBook::ApplyResult::Gap;
-        if (shadow) {
-          if (shadow->apply(rec.diff) != MirroredBook::ApplyResult::Skipped &&
-              --shadow_settle <= 0) {
-            validations.push_back(compare_books(main_book, *shadow, shadow_snap));
-            shadow.reset();
+
+        // A snapshot's lastUpdateId is the final id of a completed batch, so
+        // it should coincide exactly with some diff's `u`. Validate there.
+        if (result != MirroredBook::ApplyResult::Skipped && !targets.empty()) {
+          auto it = targets.begin();
+          while (it != targets.end() && it->first <= main_book.last_u) {
+            if (it->first == main_book.last_u) {
+              validations.push_back(compare_to_snapshot(main_book, *it->second));
+            } else {
+              // Overshot without ever hitting it: cannot reproduce that state
+              // atomically. Counted and reported rather than silently skipped.
+              ++unreachable;
+            }
+            it = targets.erase(it);
           }
         }
         break;
@@ -225,10 +250,7 @@ int run(const std::string& path, int settle_diffs) {
         break;  // consumed by the market-making simulator, not the mirror
     }
   }
-  if (shadow) {
-    validations.push_back(compare_books(main_book, *shadow, shadow_snap));
-    shadow.reset();
-  }
+  unreachable += targets.size();  // snapshots the stream never reached
 
   // ---- report --------------------------------------------------------------
   const std::uint64_t level_updates = main_book.mirror ? main_book.mirror->levels_applied() : 0;
@@ -248,13 +270,22 @@ int run(const std::string& path, int settle_diffs) {
                 main_book.engine->open_orders());
   }
 
-  std::printf("\nvalidation against %zu exchange snapshots:\n", validations.size());
+  std::printf(
+      "\nvalidation: reconstructed book vs exchange snapshot, compared at the\n"
+      "snapshot's own sequence point (last_u == lastUpdateId), top %zu levels/side:\n",
+      kCompareDepth);
   bool all_pass = true;
   for (const Validation& v : validations) {
-    std::printf("  snapshot %llu: %zu levels compared, %zu mismatches -> %s\n",
-                static_cast<unsigned long long>(v.snapshot_id), v.levels_compared, v.mismatches,
-                v.passed() ? "PASS" : "FAIL");
+    std::printf("  snapshot %llu: bid %lld/%lld ask %lld/%lld | %zu levels, %zu mismatches -> %s\n",
+                static_cast<unsigned long long>(v.snapshot_id),
+                static_cast<long long>(v.our_bid), static_cast<long long>(v.snap_bid),
+                static_cast<long long>(v.our_ask), static_cast<long long>(v.snap_ask),
+                v.levels_compared, v.mismatches, v.passed() ? "PASS" : "FAIL");
     all_pass = all_pass && v.passed();
+  }
+  if (unreachable > 0) {
+    std::printf("  note: %zu snapshot(s) did not land on a diff boundary and were not compared\n",
+                unreachable);
   }
   if (validations.empty()) {
     std::printf("  (capture contains no post-seed snapshots to validate against)\n");
@@ -269,8 +300,6 @@ int run(const std::string& path, int settle_diffs) {
 
 int main(int argc, char** argv) {
   std::string path = "data/btcusdt_capture.jsonl";
-  int settle = 200;  // ~20s of 100ms diffs
   if (argc > 1) path = argv[1];
-  if (argc > 2) settle = static_cast<int>(std::strtol(argv[2], nullptr, 10));
-  return nanolob::replay::run(path, settle);
+  return nanolob::replay::run(path);
 }
